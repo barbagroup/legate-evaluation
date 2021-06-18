@@ -43,3 +43,23 @@ Legate NumPy is designed to be a drop-in replacement of vanilla NumPy. However, 
 From a user's perspective, silent runtime failures due to bugs unknown to Legate's developers or due to insufficient defensive programming in Legate are the most frustrating. If an application has inadequate V&V, it is hard to narrow down the causes of the failures or even to know the failures' existence. Examples include issues [16](https://github.com/nv-legate/legate.numpy/issues/16), [17](https://github.com/nv-legate/legate.numpy/issues/17), and [47](https://github.com/nv-legate/legate.numpy/issues/47).
 
 On the other hand, unimplemented features are usually fine because they throw errors and stop an application from running further. However, unclear error messages and exception types sometimes confuse us. When the crashes happen at the Legion level, the errors are also unclear for Legate's end-users. There are no Python tracebacks in these crashes. Moreover, if Legion is not built with the debug mode, the Legion-level traceback is not readable. Without a proper error message or/and an exception type, we cannot know whether an error is caused by using Legate incorrectly or is due to unimplemented features. Most of the issues we created at Legate's repositories belong to this type of problem.
+
+## 3. Performance
+-----------------
+
+Legate currently focuses on weak-scaling performance. Though a good weak scaling does not mean it is fast, Legate's wall time performance is comparable to CuPy at least when an array is big enough, as seen in the benchmark result in section 1. The example application (i.e., the 12-step CFD) in this benchmark, however, is too simple to represent real-world applications. It is tutorial code for an entry-level class of computational fluid dynamics.
+
+### 3.1 Memory-related performance
+----------------------------------
+
+Legate adopts Legion's task-based parallel framework. During runtime, Legate has to analyze the code on the fly to determine the coming tasks and dispatches the tasks to computing processes. It means computing tasks have to be long enough to cover code analysis and data transfer latencies. Therefore, the sizes of the arrays involved in computing tasks have to be big enough.
+
+From the benchmark result in section 1, when the problem sizes become smaller, the gap between CuPy and Legate becomes larger. This observation proves that Legate needs arrays to be big enough to be efficient. Unfortunately, only a few GPU models have memory sizes as big as A100. If a GPU only has 16GB or even less memory, though we have not done any experiments, we suspect that Legate's performance might not be comparable to CuPy's.
+
+In the same benchmark, only when the grid size is about 160M Legate is comparable to CuPy. Each double-precision array consumes about 1.3GB of GPU memory for the raw numeric data at this grid size. Though this usage does not seem significant, it poses a problem when running complex numerical simulations. In real-world numerical simulations, usually, we need more than one array for computing. For example, even the toy application in this benchmark requires at least 7 arrays permanently residing in memory and other temporary arrays that come and go. Another example is our Python shallow-water equation solver, [TorchSWE](https://github.com/piyueh/TorchSWE), which requires 81 permanent arrays. If an array has to be greater than 1GB for Legate's best performance, then no TorchSWE simulation can fit an A100 80GB GPU and be efficient at the same time.
+
+The task-based parallelism in Legate also introduces overhead in memory usage. From the benchmark result, while CuPy can handle up to a grid size of 655M, Legate fails to do so due to out-of-memory. The memory overhead also adds difficulty for a Legate application to fit in a GPU and be efficient at the same time.
+
+It is possible to reduce the required number of permanent and temporary arrays in application code to handle a bigger grid size with Legate and increase the efficiency. However, most Python-based numerical solvers are prototypes, proof-of-concept, or thin interfaces to some other non-Python codes. In other words, most Python numerical solvers are not optimized and will not be optimized. So as a drop-in replacement for NumPy, we believe Legate should not assume application code to be optimized in memory usage.
+
+Lastly, though NVIDIA resolved the memory-leak (or says, garbage-collection) problem ([issue 33](https://github.com/nv-legate/legate.numpy/issues/33)), an memory issue regarding cuBlas is still open ([issue 36](https://github.com/nv-legate/legate.numpy/issues/36)). From our experience, however, the growth of memory due to cuBlas is relatively slow.
