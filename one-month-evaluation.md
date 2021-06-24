@@ -49,17 +49,43 @@ On the other hand, unimplemented features are usually fine because they throw er
 
 Legate currently focuses on weak-scaling performance. Though a good weak scaling does not mean it is fast, Legate's wall time performance is comparable to CuPy at least when an array is big enough, as seen in the benchmark result in section 1. The example application (i.e., the 12-step CFD) in this benchmark, however, is too simple to represent real-world applications. It is tutorial code for an entry-level class of computational fluid dynamics.
 
-### 3.1 Memory-related performance
-----------------------------------
+### 3.1 Memory-related issues
+-----------------------------
 
 Legate adopts Legion's task-based parallel framework. During runtime, Legate has to analyze the code on the fly to determine the coming tasks and dispatches the tasks to computing processes. It means computing tasks have to be long enough to cover code analysis and data transfer latencies. Therefore, the sizes of the arrays involved in computing tasks have to be big enough.
 
 From the benchmark result in section 1, when the problem sizes become smaller, the gap between CuPy and Legate becomes larger. This observation proves that Legate needs arrays to be big enough to be efficient. Unfortunately, only a few GPU models have memory sizes as big as A100. If a GPU only has 16GB or even less memory, though we have not done any experiments, we suspect that Legate's performance might not be comparable to CuPy's.
 
-In the same benchmark, only when the grid size is about 160M Legate is comparable to CuPy. Each double-precision array consumes about 1.3GB of GPU memory for the raw numeric data at this grid size. Though this usage does not seem significant, it poses a problem when running complex numerical simulations. In real-world numerical simulations, usually, we need more than one array for computing. For example, even the toy application in this benchmark requires at least 7 arrays permanently residing in memory and other temporary arrays that come and go. Another example is our Python shallow-water equation solver, [TorchSWE](https://github.com/piyueh/TorchSWE), which requires 81 permanent arrays. If an array has to be greater than 1GB for Legate's best performance, then no TorchSWE simulation can fit an A100 80GB GPU and be efficient at the same time.
+In the same benchmark, only when the grid size is about 160M Legate is comparable to CuPy. Each double-precision array consumes about 1.3GB of GPU memory for the raw numeric data at this grid size. Though this usage does not seem significant, it poses a problem when running complex numerical simulations. In real-world numerical simulations, usually, we need more than one array for computing. For example, even the toy application in this benchmark requires at least 7 arrays permanently residing in memory and other temporary arrays that come and go. Another example is our Python shallow-water equation solver, [TorchSWE](https://github.com/piyueh/TorchSWE), which requires 61 permanent arrays. If an array has to be greater than 1.3GB for Legate's best performance, then no TorchSWE simulation can fit an A100 80GB GPU and be efficient at the same time.
 
 The task-based parallelism in Legate also introduces overhead in memory usage. From the benchmark result, while CuPy can handle up to a grid size of 655M, Legate fails to do so due to out-of-memory. The memory overhead also adds difficulty for a Legate application to fit in a GPU and be efficient at the same time.
 
-It is possible to reduce the required number of permanent and temporary arrays in application code to handle a bigger grid size with Legate and increase the efficiency. However, most Python-based numerical solvers are prototypes, proof-of-concept, or thin interfaces to some other non-Python codes. In other words, most Python numerical solvers are not optimized and will not be optimized. So as a drop-in replacement for NumPy, we believe Legate should not assume application code to be optimized in memory usage.
+It is possible to reduce the required number of permanent and temporary arrays in application code to handle a bigger grid size with Legate and increase the efficiency. However, most Python-based numerical solvers are prototypes, proof-of-concept, or thin interfaces to some other non-Python codes. In other words, most Python numerical solvers are not optimized and will not be optimized. So as a drop-in replacement for NumPy, we believe Legate should assume application code less optimized in memory usage.
 
-Lastly, though NVIDIA resolved the memory-leak (or says, garbage-collection) problem ([issue 33](https://github.com/nv-legate/legate.numpy/issues/33)), an memory issue regarding cuBlas is still open ([issue 36](https://github.com/nv-legate/legate.numpy/issues/36)). From our experience, however, the growth of memory due to cuBlas is relatively slow.
+Lastly, though NVIDIA resolved the memory-leak (or says, garbage-collection) problem ([issue 33](https://github.com/nv-legate/legate.numpy/issues/33)), a memory issue regarding cuBlas is still open ([issue 36](https://github.com/nv-legate/legate.numpy/issues/36)). From our experience, however, the growth of memory due to cuBlas is relatively slow.
+
+### 3.2 Other performance issues
+--------------------------------
+
+[Issue 29](https://github.com/nv-legate/legate.numpy/issues/29) at the Legate NumPy repository shows that checking the convergence error during a time marching loop adds a synchronization point and blocks Legate from scheduling computing tasks ahead. Checking the convergence error less frequently makes more tasks run asynchronously. Also, this strategy allows Legate to schedule more computing tasks in the future and exploit the full power of the hardware.
+
+Figure 3.1 to figure 3.3 show the profiling results of three different versions of the Jacobi solver in [issue 29](https://github.com/nv-legate/legate.numpy/issues/29). The horizontal axis is wall time, which spans 0.5 seconds in all figures. Colored blocks are GPU computing tasks, and green curves are GPU overall utilizations. Figure 3.1 is the result of the original Jacobi solver, which calculates the convergence error every iteration and checks whether the error meets a loop-stopping criterion. The Jacobi solver for figure 3.2 still calculates the error every iteration but only checks with the loop-stopping criterion every 100 iterations. Finally, the code of figure 3.3 calculates and checks the error every 100 iterations.
+
+All tests used a 5001x5001 grid and run for 5000 iterations. Original Jacobi solver took about 25 seconds to finish with an A100 80GB GPU. The version 1 modification (i.e., the code of figure 3.2) finished in 20 seconds, and the version 2 modification finished in about 13 seconds.
+
+As seen in figure 3.1, the GPU was under idle state longer than the other two cases. It may indicate that checking the error with the loop-stopping criterion makes Legate's runtime analyzer unable to "see" into future iterations. It may need to perform more analysis at the end of each iteration to know what to do next on GPU, hence more GPU idle time.
+
+Comparing figure 3.1 and 3.2 (both calculate errors every iteration), figure 3.2 shows more stacked blocks, which means more GPU tasks were able to run simultaneously to exploit the GPU's full power. Therefore, we can see more iterations in figure 3.2. In addition, the GPU's idle time is shorter.
+
+On the other hand, in figure 3.3, the code calculates the error only every 100 iterations, hence fewer GPU tasks per iteration, and hence each iteration takes less time. Eventually, the code for figure 3.2 is much faster than the other two.
+
+![Figure 3.1](figures/issue_29_original.png)
+_**Figure 3.1** Profiling result of original code in issue 29 in a 0.5 second timespan_
+
+![Figure 3.2](figures/issue_29_mod_1.png)
+_**Figure 3.2** Profiling result of modified code (version 1) in a 0.5 second timespan_
+
+![Figure 3.3](figures/issue_29_mod_2.png)
+_**Figure 3.3** Profiling result of modified code (version 2) in a 0.5 second timespan_
+
+[Issue 29](https://github.com/nv-legate/legate.numpy/issues/29) represents a likely issue when using Legate as a _drop-in replacement_ of NumPy in an existing Python application. As mentioned previously, most Python-based solvers are usually less optimized. Users probably will have spend some time to finally realize why their Python solvers are slow when using Legate.
