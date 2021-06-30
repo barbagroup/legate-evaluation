@@ -16,6 +16,9 @@ In NVIDIA’s figure, when using one A100, CuPy gives a throughput of about 1.66
 
 Though the absolute throughput values do not match, we consider the reproduction to be successful. Many factors may contribute to the difference in the absolute throughput. For example, NVIDIA did not detail how they calculated the throughput. Did they include the boundary points? How many temporal iterations did they use? The difference in how we instrumented the code also affects the absolute values.
 
+UPDATE: 
+From Lorena Barba's correspondence with Michael Garland, we know that the problem size used in NVIDIA's demo is 162 million points per GPU.  The benchmark runs that for 100 iterations.  The throughput reported is simply (162M*100 / time).
+
 ## 2. User experience
 ---------------------
 
@@ -58,26 +61,26 @@ From the benchmark result in section 1, when the problem sizes become smaller, t
 
 In the same benchmark, only when the grid size is about 160M Legate is comparable to CuPy. Each double-precision array consumes about 1.3GB of GPU memory for the raw numeric data at this grid size. Though this usage does not seem significant, it poses a problem when running complex numerical simulations. In real-world numerical simulations, usually, we need more than one array for computing. For example, even the toy application in this benchmark requires at least 7 arrays permanently residing in memory and other temporary arrays that come and go. Another example is our Python shallow-water equation solver, [TorchSWE](https://github.com/piyueh/TorchSWE), which requires 61 permanent arrays. If an array has to be greater than 1.3GB for Legate's best performance, then no TorchSWE simulation can fit an A100 80GB GPU and be efficient at the same time.
 
-The task-based parallelism in Legate also introduces overhead in memory usage. From the benchmark result, while CuPy can handle up to a grid size of 655M, Legate fails to do so due to out-of-memory. The memory overhead also adds difficulty for a Legate application to fit in a GPU and be efficient at the same time.
+The task-based parallelism in Legate also introduces overhead in memory usage. From the benchmark result, while CuPy can handle up to a grid size of 655M, Legate fails to do so due to running out-of-memory. The memory overhead also adds difficulty for a Legate application to fit in a GPU and be efficient at the same time.
 
-It is possible to reduce the required number of permanent and temporary arrays in application code to handle a bigger grid size with Legate and increase the efficiency. However, most Python-based numerical solvers are prototypes, proof-of-concept, or thin interfaces to some other non-Python codes. In other words, most Python numerical solvers are not optimized and will not be optimized. So as a drop-in replacement for NumPy, we believe Legate should assume application code less optimized in memory usage.
+It is possible to reduce the required number of permanent and temporary arrays in application code to handle a bigger grid size with Legate and increase the efficiency. However, most Python-based numerical solvers are prototypes, proof-of-concept, or thin interfaces to some other non-Python codes. In other words, most Python numerical solvers are not optimized and will not be optimized. So as a drop-in replacement for NumPy, we believe Legate should assume application codes are less optimized in regards to memory usage.
 
-Lastly, though NVIDIA resolved the memory-leak (or says, garbage-collection) problem ([issue 33](https://github.com/nv-legate/legate.numpy/issues/33)), a memory issue regarding cuBlas is still open ([issue 36](https://github.com/nv-legate/legate.numpy/issues/36)). From our experience, however, the growth of memory due to cuBlas is relatively slow.
+Lastly, though NVIDIA resolved the memory-leak (or garbage-collection) problem ([issue 33](https://github.com/nv-legate/legate.numpy/issues/33)), a memory issue regarding cuBlas is still open ([issue 36](https://github.com/nv-legate/legate.numpy/issues/36)). From our experience, however, the growth of memory due to cuBlas is relatively slow.
 
 ### 3.2 Other performance issues
 --------------------------------
 
-[Issue 29](https://github.com/nv-legate/legate.numpy/issues/29) at the Legate NumPy repository shows that checking the convergence error during a time marching loop adds a synchronization point and blocks Legate from scheduling computing tasks ahead. Checking the convergence error less frequently makes more tasks run asynchronously. Also, this strategy allows Legate to schedule more computing tasks in the future and exploit the full power of the hardware.
+[Issue 29](https://github.com/nv-legate/legate.numpy/issues/29) at the Legate NumPy repository shows that checking the convergence residual during a time marching loop adds a synchronization point and blocks Legate from scheduling computing tasks ahead. Checking the convergence residual less frequently makes more tasks run asynchronously. Also, this strategy allows Legate to schedule more computing tasks in the future and exploit the full power of the hardware.
 
-Figure 3.1 to figure 3.3 show the profiling results of three different versions of the Jacobi solver in [issue 29](https://github.com/nv-legate/legate.numpy/issues/29). The horizontal axis is wall time, which spans 0.5 seconds in all figures. Colored blocks are GPU computing tasks, and green curves are GPU overall utilizations. Figure 3.1 is the result of the original Jacobi solver, which calculates the convergence error every iteration and checks whether the error meets a loop-stopping criterion. The Jacobi solver for figure 3.2 still calculates the error every iteration but only checks with the loop-stopping criterion every 100 iterations. Finally, the code of figure 3.3 calculates and checks the error every 100 iterations.
+Figure 3.1 to figure 3.3 show the profiling results of three different versions of the Jacobi solver in [issue 29](https://github.com/nv-legate/legate.numpy/issues/29). The horizontal axis is wall time, which spans 0.5 seconds in all figures. Colored blocks are GPU computing tasks, and green curves are GPU overall utilizations. Figure 3.1 is the result of the original Jacobi solver, which calculates the convergence residual every iteration and checks whether the residual meets a loop-stopping criterion. The Jacobi solver for figure 3.2 still calculates the residual every iteration but only checks with the loop-stopping criterion every 100 iterations. Finally, the code of figure 3.3 calculates and checks the residual every 100 iterations.
 
-All tests used a 5001x5001 grid and run for 5000 iterations. Original Jacobi solver took about 25 seconds to finish with an A100 80GB GPU. The version 1 modification (i.e., the code of figure 3.2) finished in 20 seconds, and the version 2 modification finished in about 13 seconds.
+All tests used a 5001x5001 grid and ran for 5000 iterations. Original Jacobi solver took about 25 seconds to finish with an A100 80GB GPU. The version 1 modification (i.e., the code of figure 3.2) finished in 20 seconds, and the version 2 modification finished in about 13 seconds.
 
-As seen in figure 3.1, the GPU was under idle state longer than the other two cases. It may indicate that checking the error with the loop-stopping criterion makes Legate's runtime analyzer unable to "see" into future iterations. At the end of each iteration, it may need to perform analysis to know what to do next on GPU, hence more GPU idle time.
+As seen in figure 3.1, the GPU was under idle state longer than the other two cases. It may indicate that checking the residual with the loop-stopping criterion makes Legate's runtime analyzer unable to "see" into future iterations. At the end of each iteration, it may need to perform analysis to know what to do next on GPU, hence more GPU idle time.
 
-Compared to figure 3.1, figure 3.2 (which also calculates errors every iteration) shows more stacked blocks, which means more GPU tasks were able to run simultaneously to exploit the GPU's full power. Therefore, we can see more iterations in figure 3.2. In addition, the GPU's idle time is shorter.
+Compared to figure 3.1, figure 3.2 (which also calculates residuals every iteration) shows more stacked blocks, which means more GPU tasks were able to run simultaneously to exploit the GPU's full power. Therefore, we can see more iterations in figure 3.2. In addition, the GPU's idle time is shorter.
 
-In figure 3.3, the code calculates the error only every 100 iterations, hence fewer GPU tasks per iteration, and each iteration takes less time. Eventually, the code for figure 3.2 is much faster than the other two.
+In figure 3.3, the code calculates the residual only every 100 iterations, hence fewer GPU tasks per iteration, and each iteration takes less time. Eventually, the code for figure 3.2 is much faster than the other two.
 
 ![Figure 3.1](figures/issue_29_original.png)
 _**Figure 3.1** Profiling result of original code in issue 29 in a 0.5 second timespan_
@@ -95,6 +98,6 @@ _**Figure 3.3** Profiling result of modified code (version 2) in a 0.5 second ti
 
 Legate is still in its early stage of development. Issues and bugs should be expected. However, during our tests, we feel that a few of the issues concern some basic features that Legate must have in order to be an effective _drop-in replacement_ of NumPy. We believe that some of these issues are due to not being tested with real-world Python applications. Real-world applications are complicated in both software design and required NumPy features.
 
-On the other hand, though real-world Python applications may be complicated, they are often not optimized and not designed for the HPC purpose. It will be nice if Legate can also give a good performance when an application code is not well designed.
+On the other hand, though real-world Python applications may be complicated, they are often not optimized and not designed for the HPC purpose. It will be nice if Legate can also give a good performance when an application code is not optimally designed.
 
 Finally, one crucial feature of Legate is the capability to run under multi-node and multi-GPU configurations. At the current stage, we have not yet tested these configurations. We lack the required hardware resources. Also, we believe it may be better to resolve the issues encountered in single-node/-GPU configurations before moving on.
